@@ -1,0 +1,732 @@
+{
+  "name": "Salones Aurora - Bot WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "salones-aurora-whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "17d23c4d-fd56-412b-86bf-ae0ef4991dcc",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        224
+      ],
+      "webhookId": "salones-aurora-whatsapp",
+      "notes": "Recibe mensajes entrantes de WhatsApp (Meta Cloud API o Twilio). Configura la URL de este webhook en tu proveedor."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── NORMALIZAR MENSAJE ENTRANTE ─────────────────────────────────────────\n// Soporta tanto Meta Cloud API como Twilio\nconst body = $input.first().json;\n\nlet from = '';\nlet messageText = '';\nlet messageId = '';\nlet provider = 'unknown';\n\n// ── Meta Cloud API ──\nif (body.entry && body.entry[0]?.changes) {\n  provider = 'meta';\n  const change = body.entry[0].changes[0];\n  const msg = change.value?.messages?.[0];\n  if (!msg) {\n    return [{ json: { skip: true } }];\n  }\n  from = msg.from;\n  messageText = msg.text?.body || '';\n  messageId = msg.id;\n}\n\n// ── Twilio ──\nif (body.From && body.Body) {\n  provider = 'twilio';\n  from = body.From.replace('whatsapp:', '');\n  messageText = body.Body;\n  messageId = body.MessageSid;\n}\n\nif (!from || !messageText) {\n  return [{ json: { skip: true } }];\n}\n\nreturn [{\n  json: {\n    from,\n    messageText: messageText.trim(),\n    messageId,\n    provider,\n    skip: false,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "79fe5e24-7b5c-42c8-a0d3-0455dd0af9b9",
+      "name": "Normalizar Mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1760,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1b24baa6-a424-43e9-92d8-080efe0399b6",
+      "name": "¿Mensaje válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ 'aurora_session_' + $json.from }}",
+        "options": {}
+      },
+      "id": "24863485-ed49-4ee9-bb54-9e2ec4b873a2",
+      "name": "Leer Sesión",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1328,
+        144
+      ],
+      "credentials": {
+        "redis": {
+          "id": "Wvaq6jmADApvOlus",
+          "name": "Redis account"
+        }
+      },
+      "notes": "Lee el historial de conversación del usuario desde Redis. Configura tus credenciales de Redis aquí."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── PREPARAR HISTORIAL DE CONVERSACIÓN ──────────────────────────────────\nconst sessionRaw = $input.first().json;\nconst userMessage = $('Normalizar Mensaje').first().json.messageText;\nconst from = $('Normalizar Mensaje').first().json.from;\n\nlet history = [];\ntry {\n  if (sessionRaw.value) {\n    history = JSON.parse(sessionRaw.value);\n  }\n} catch(e) {\n  history = [];\n}\n\n// Agregar mensaje del usuario al historial\nhistory.push({\n  role: 'user',\n  content: userMessage\n});\n\n// Mantener solo los últimos 10 mensajes para no exceder contexto\nif (history.length > 10) {\n  history = history.slice(-10);\n}\n\nreturn [{\n  json: {\n    from,\n    userMessage,\n    history,\n    provider: $('Normalizar Mensaje').first().json.provider\n  }\n}];"
+      },
+      "id": "8bf61160-76fc-4e8a-a02f-0e3b95143beb",
+      "name": "Preparar Historial",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1104,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-opus-4-5\",\n  \"max_tokens\": 1024,\n  \"system\": \"Eres el asistente virtual de Salones Aurora, un salón de eventos en Xalapa, Veracruz. Tu nombre es Aurora.\\n\\nINFORMACIÓN DEL SALÓN:\\n- Nombre: Salones Aurora\\n- Dirección: Carlos A. Carrillo No. 23, Col. Aguacatal, Xalapa, Ver., C.P. 91130\\n- Teléfono fijo: 228 2 98 48 71 | WhatsApp: 228 113 36 83\\n- Horario de atención: Lunes a Viernes 10:30am-14:30hrs y 16:30hrs-18:30hrs. Sábado: 10:30am-14:30hrs.\\n- Capacidad máxima: 213 personas (sin mínimo de personas)\\n- Solo se renta el salón. NO se manejan banquetes ni renta de mantelería.\\n\\nPRECIOS DE RENTA:\\n- Lunes a Jueves: $4,500.00 (conferencias, horario 8:00am a 16:00hrs)\\n- Viernes: $7,500.00\\n- Sábado: $9,500.00\\n- Domingo: $6,500.00 (horario máximo hasta las 20:00hrs)\\n- Horas extras: $950.00 por hora\\n\\nLa renta es por 6 horas de servicio. Se incluye 1 hora antes para decorar y 1 hora después para recoger utilería.\\n\\nINCLUYE EN LA RENTA:\\n- Mobiliario: sillas plegables y mesas redondas (NO incluye mantelería)\\n- Personal de seguridad\\n- Insumos de sanitarios (papel higiénico, papel secador y shampoo)\\n\\nCLIENTES PUEDEN TRAER: sus propios proveedores de banquetes, DJ, etc.\\n\\nMONTAJE: Si el día anterior no hay evento, el cliente puede usar el salón desde ese día en horario de 10:30 a 18:30hrs para decorar. El salón no realiza montaje del mobiliario.\\n\\nINSTRUCCIONES:\\n1. Responde siempre en español, de forma amable y profesional\\n2. Si el cliente quiere COTIZAR, recopila: tipo de evento, fecha tentativa, número de invitados\\n3. Si el cliente quiere AGENDAR UNA VISITA, recopila: nombre completo, fecha y hora preferida para visitar\\n4. Si el cliente quiere HACER UNA RESERVA, recopila: nombre completo, tipo de evento, fecha del evento, número de invitados\\n5. Cuando tengas todos los datos de una visita o reserva, di exactamente: ACCIÓN:AGENDAR_VISITA o ACCIÓN:CREAR_RESERVA seguido de los datos en JSON\\n6. Si no puedes responder algo, di exactamente: ACCIÓN:TRANSFERIR_HUMANO\\n7. Sé conciso, los mensajes de WhatsApp deben ser cortos y claros\\n8. Usa emojis con moderación para dar calidez\",\n  \"messages\": {{ JSON.stringify($json.history) }}\n}",
+        "options": {}
+      },
+      "id": "d2fce59e-bb69-48a7-9e67-4e37d8555779",
+      "name": "Claude IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -880,
+        144
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "NJV5Ri691juyCr9n",
+          "name": "Header Auth account 5"
+        }
+      },
+      "notes": "Llama a Claude (Anthropic API). Configura tus credenciales de API Key aquí con Header Auth. Header name: x-api-key"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── EXTRAER RESPUESTA Y DETECTAR ACCIONES ───────────────────────────────\nconst response = $input.first().json;\nconst assistantMessage = response.content?.[0]?.text || 'Lo siento, ocurrió un error. Por favor intenta de nuevo.';\n\nconst from = $('Preparar Historial').first().json.from;\nconst history = $('Preparar Historial').first().json.history;\nconst provider = $('Preparar Historial').first().json.provider;\n\n// Actualizar historial con respuesta del asistente\nconst updatedHistory = [...history, {\n  role: 'assistant',\n  content: assistantMessage\n}];\n\n// Detectar acciones especiales\nlet action = 'RESPONDER';\nlet actionData = null;\nlet cleanMessage = assistantMessage;\n\nif (assistantMessage.includes('ACCIÓN:TRANSFERIR_HUMANO')) {\n  action = 'TRANSFERIR_HUMANO';\n  cleanMessage = assistantMessage.replace('ACCIÓN:TRANSFERIR_HUMANO', '').trim();\n}\n\nif (assistantMessage.includes('ACCIÓN:AGENDAR_VISITA')) {\n  action = 'AGENDAR_VISITA';\n  try {\n    const jsonMatch = assistantMessage.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) actionData = JSON.parse(jsonMatch[0]);\n  } catch(e) {}\n  cleanMessage = assistantMessage.split('ACCIÓN:AGENDAR_VISITA')[0].trim();\n}\n\nif (assistantMessage.includes('ACCIÓN:CREAR_RESERVA')) {\n  action = 'CREAR_RESERVA';\n  try {\n    const jsonMatch = assistantMessage.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) actionData = JSON.parse(jsonMatch[0]);\n  } catch(e) {}\n  cleanMessage = assistantMessage.split('ACCIÓN:CREAR_RESERVA')[0].trim();\n}\n\nreturn [{\n  json: {\n    from,\n    provider,\n    assistantMessage,\n    cleanMessage: cleanMessage || assistantMessage,\n    action,\n    actionData,\n    updatedHistory\n  }\n}];"
+      },
+      "id": "6d7bd507-4a0d-4141-90d9-dc95fb7195f7",
+      "name": "Procesar Respuesta IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ 'aurora_session_' + $json.from }}",
+        "value": "={{ JSON.stringify($json.updatedHistory) }}",
+        "expire": true,
+        "ttl": 86400
+      },
+      "id": "8634bdfe-3120-4865-8dca-7924e899b8af",
+      "name": "Guardar Sesión",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        144
+      ],
+      "credentials": {
+        "redis": {
+          "id": "Wvaq6jmADApvOlus",
+          "name": "Redis account"
+        }
+      },
+      "notes": "Guarda el historial de conversación. TTL de 24 horas (86400 segundos)."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-visita",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "AGENDAR_VISITA",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Agendar Visita"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-reserva",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "CREAR_RESERVA",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Crear Reserva"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-humano",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "TRANSFERIR_HUMANO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Transferir Humano"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "20326798-dd69-4bd3-9f64-781394df204d",
+      "name": "Enrutar Acción",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -224,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "start": "={{ $json.actionData?.fechaVisita || '' }}",
+        "end": "={{ $json.actionData?.fechaVisitaFin || '' }}",
+        "additionalFields": {
+          "description": "=Cliente: {{ $json.actionData?.nombre }}\\nTeléfono: {{ $json.from }}\\nNota: Visita agendada via WhatsApp Bot",
+          "location": "Carlos A. Carrillo No. 23, Col. Aguacatal, Xalapa, Ver., C.P. 91130",
+          "summary": "=Visita Salones Aurora - {{ $json.actionData?.nombre || 'Cliente' }}"
+        }
+      },
+      "id": "5c1da809-3969-419a-a84e-cf200b64dbcb",
+      "name": "Crear Evento Visita en Google Calendar",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "LBXOUi9SuOEilRk6",
+          "name": "Google Calendar account"
+        }
+      },
+      "notes": "Crea el evento de visita en Google Calendar. Configura tus credenciales de Google Calendar aquí."
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "start": "={{ $json.actionData?.fechaEvento || '' }}",
+        "end": "={{ $json.actionData?.fechaEventoFin || '' }}",
+        "additionalFields": {
+          "description": "=Cliente: {{ $json.actionData?.nombre }}\\nTeléfono: {{ $json.from }}\\nTipo de evento: {{ $json.actionData?.tipoEvento }}\\nInvitados: {{ $json.actionData?.invitados }}\\n⚠️ PENDIENTE CONFIRMACIÓN POR HUMANO",
+          "location": "Carlos A. Carrillo No. 23, Col. Aguacatal, Xalapa, Ver., C.P. 91130",
+          "summary": "=🎉 RESERVA: {{ $json.actionData?.tipoEvento || 'Evento' }} - {{ $json.actionData?.nombre || 'Cliente' }}"
+        }
+      },
+      "id": "a9924c39-fcdc-4448-8651-7717621544c9",
+      "name": "Crear Evento Reserva en Google Calendar",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        144
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "LBXOUi9SuOEilRk6",
+          "name": "Google Calendar account"
+        }
+      },
+      "notes": "Bloquea la fecha de la reserva en Google Calendar (marcada como pendiente de confirmación)."
+    },
+    {
+      "parameters": {
+        "sendTo": "medusssa.studio@gmail.com",
+        "subject": "=⚠️ Nueva Reserva Pendiente - {{ $json.actionData?.nombre || 'Cliente' }}",
+        "emailType": "text",
+        "message": "=Se ha recibido una nueva solicitud de reserva via WhatsApp Bot.\n\nDATOS DEL CLIENTE:\n- Nombre: {{ $json.actionData?.nombre || 'No especificado' }}\n- WhatsApp: {{ $json.from }}\n- Tipo de evento: {{ $json.actionData?.tipoEvento || 'No especificado' }}\n- Fecha del evento: {{ $json.actionData?.fechaEvento || 'No especificada' }}\n- Número de invitados: {{ $json.actionData?.invitados || 'No especificado' }}\n\nACCIÓN REQUERIDA:\nPor favor confirma la disponibilidad de la fecha y contacta al cliente para:\n1. Confirmar la reserva\n2. Acordar el anticipo\n3. Enviar contrato\n\nEste mensaje fue generado automáticamente por el Bot de Salones Aurora.",
+        "options": {}
+      },
+      "id": "f156f576-c410-45a4-8b41-e020662901c1",
+      "name": "Notificar Admin por Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        144
+      ],
+      "webhookId": "8c2849f7-33f8-4962-8120-21b4ff380440",
+      "notes": "Envía notificación al administrador cuando hay una nueva reserva. Configura credenciales de Gmail y cambia el email del admin."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── CONSTRUIR MENSAJE WHATSAPP ──────────────────────────────────────────\nconst data = $input.first().json;\nconst prevData = $('Procesar Respuesta IA').first().json;\n\nlet message = prevData.cleanMessage;\nconst from = prevData.from;\nconst provider = prevData.provider;\n\n// Si llegó de un nodo de Calendar, agregar confirmación\nif (data.id || data.htmlLink) {\n  if (prevData.action === 'AGENDAR_VISITA') {\n    message = prevData.cleanMessage + '\\n\\n✅ Tu visita ha quedado registrada en nuestro calendario. Te esperamos.';\n  } else if (prevData.action === 'CREAR_RESERVA') {\n    message = prevData.cleanMessage + '\\n\\n✅ Tu fecha ha sido bloqueada en nuestro calendario. Un miembro de nuestro equipo te contactará pronto para confirmar tu reserva.';\n  }\n}\n\nreturn [{ json: { from, provider, message } }];"
+      },
+      "id": "28820640-8c4a-4ea7-aeb4-3d7a0d7638b4",
+      "name": "Preparar Mensaje Final",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "cond-provider",
+              "leftValue": "={{ $json.provider }}",
+              "rightValue": "twilio",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5aa20993-be79-4a39-9ebb-8173ed260275",
+      "name": "¿Meta o Twilio?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        672,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $vars.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $vars.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"recipient_type\": \"individual\",\n  \"to\": \"{{ $json.from }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"preview_url\": false,\n    \"body\": \"{{ $json.message }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "294884e3-73b3-456e-9ed8-c9ac86d8eb0e",
+      "name": "Enviar por Meta API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        64
+      ],
+      "notes": "Envía respuesta por Meta Cloud API. Crea variables en n8n: WHATSAPP_PHONE_NUMBER_ID y WHATSAPP_ACCESS_TOKEN"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $vars.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "From",
+              "value": "=whatsapp:{{ $vars.TWILIO_WHATSAPP_NUMBER }}"
+            },
+            {
+              "name": "To",
+              "value": "=whatsapp:{{ $json.from }}"
+            },
+            {
+              "name": "Body",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1468715c-cfcd-4b70-bdd6-c8274003ed36",
+      "name": "Enviar por Twilio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        224
+      ],
+      "notes": "Envía respuesta por Twilio. Configura credenciales HTTP Basic Auth y variables TWILIO_ACCOUNT_SID y TWILIO_WHATSAPP_NUMBER"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"ok\"}",
+        "options": {}
+      },
+      "id": "3d9ff6df-7717-4391-a092-d29ee5db54f1",
+      "name": "Responder 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1104,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"ignored\"}",
+        "options": {}
+      },
+      "id": "9fbbff71-bd6b-4c63-9602-ab4a1a4973b0",
+      "name": "Ignorar Mensaje Inválido",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -1328,
+        368
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar Mensaje": {
+      "main": [
+        [
+          {
+            "node": "¿Mensaje válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Mensaje válido?": {
+      "main": [
+        [
+          {
+            "node": "Leer Sesión",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignorar Mensaje Inválido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Sesión": {
+      "main": [
+        [
+          {
+            "node": "Preparar Historial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Historial": {
+      "main": [
+        [
+          {
+            "node": "Claude IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude IA": {
+      "main": [
+        [
+          {
+            "node": "Procesar Respuesta IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Procesar Respuesta IA": {
+      "main": [
+        [
+          {
+            "node": "Guardar Sesión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar Sesión": {
+      "main": [
+        [
+          {
+            "node": "Enrutar Acción",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrutar Acción": {
+      "main": [
+        [
+          {
+            "node": "Crear Evento Visita en Google Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Crear Evento Reserva en Google Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Mensaje Final",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Mensaje Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear Evento Visita en Google Calendar": {
+      "main": [
+        [
+          {
+            "node": "Preparar Mensaje Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear Evento Reserva en Google Calendar": {
+      "main": [
+        [
+          {
+            "node": "Notificar Admin por Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notificar Admin por Email": {
+      "main": [
+        [
+          {
+            "node": "Preparar Mensaje Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Mensaje Final": {
+      "main": [
+        [
+          {
+            "node": "¿Meta o Twilio?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Meta o Twilio?": {
+      "main": [
+        [
+          {
+            "node": "Enviar por Twilio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enviar por Meta API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar por Meta API": {
+      "main": [
+        [
+          {
+            "node": "Responder 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar por Twilio": {
+      "main": [
+        [
+          {
+            "node": "Responder 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "afa3868a-3426-4b25-9010-f8b93df56252",
+  "meta": {
+    "instanceId": "6913b1d09fbbbc50822e20411fbbd877f59bbf70d3f81628b44e56e2f8d2c494"
+  },
+  "id": "y3yxcqiJP3jAkCtB",
+  "tags": [
+    {
+      "updatedAt": "2026-04-14T18:52:33.655Z",
+      "createdAt": "2026-04-14T18:52:33.655Z",
+      "id": "YUrzjAyr358VL4RR",
+      "name": "WhatsApp Bot"
+    },
+    {
+      "updatedAt": "2026-04-14T18:52:33.648Z",
+      "createdAt": "2026-04-14T18:52:33.648Z",
+      "id": "lwnqd5Js7yCZMicT",
+      "name": "Salones Aurora"
+    }
+  ]
+}
