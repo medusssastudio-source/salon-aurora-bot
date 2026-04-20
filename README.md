@@ -1,3 +1,1 @@
-# Salon Aurora Bot
-
-Asistente virtual para Salones Aurora - Xalapa, Ver.
+Carpeta para guardar conversaciones antiguas con Claude.
